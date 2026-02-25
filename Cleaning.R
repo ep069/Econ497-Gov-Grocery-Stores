@@ -233,4 +233,3 @@ map |> addLayersControl(
   options = layersControlOptions(collapsed = FALSE)
 )
 
-rm(m)
