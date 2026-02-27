@@ -159,48 +159,110 @@ merged_data <- merged_data |>
     
     # Convert each to miles (1 deg lat ≈ 69 miles, 1 deg long ≈ 54 miles at 39°N)
     lat_miles = lat_diff * 69,
-    long_miles = long_diff * 54,
+    long_miles = long_diff * 69 * cos(reference_lat * pi / 180),  # changed from 54
     
-    # Calculate distance in miles using Pythagorean theorem
     crime_distance_miles_fs = sqrt(lat_miles^2 + long_miles^2)
   )
+
+
+
+
+#Organizing by theft or not theft
+
+unique(crime_data_sh_nsh$Description)
+
+theft_keywords <- c("steal", "burglary", "burg", "shoplifting", "larceny", 
+                    "auto theft", "motor vehicle theft", "theft", "purse", 
+                    "pickpocket", "embezzlement", "stolen property", "robbery",
+                    "counterfeiting", "forgery", "forged", "fraud", "bad checks",
+                    "credit/debit", "credit card", "wire fraud", "identity theft",
+                    "extortion", "false pretenses", "welfare fraud", "pocket")
+
+merged_data <- merged_data |>
+  mutate(
+    theft = as.numeric(grepl(paste(theft_keywords, collapse = "|"), 
+                             Description, ignore.case = TRUE)),
+    non_theft = as.numeric(!grepl(paste(theft_keywords, collapse = "|"), 
+                                  Description, ignore.case = TRUE))
+  )
+
+merged_data |> count(Description, theft) |> print(n=218)
+
+#close or not close
+merged_data <- merged_data |>
+  mutate(
+    close = as.numeric(crime_distance_miles_fs <= 0.25),
+    far = as.numeric(crime_distance_miles_fs > 0.25)
+  )
+
+merged_data |> count(close, far)
+
+#after open or not
+
+merged_data <- merged_data |>
+  mutate(
+    datetime = as.POSIXct(paste(date, time), format = "%Y-%m-%d %H:%M:%S"),
+    after_open = as.numeric(date >= as.Date("2018-06-16")),
+    before_open = as.numeric(date < as.Date("2018-06-16"))
+  )
+
+
+daily_data <- merged_data |>
+  group_by(date, close, theft, violent) |>
+  summarise(
+    TotalCrimes = n(),
+    after_open = max(after_open),
+    .groups = "drop"
+  ) |>
+  arrange(date)
+
+
+daily_data <- merged_data |>
+  group_by(date, close, theft, violent) |>
+  summarise(
+    TotalCrimes = n(),
+    after_open = max(after_open),
+    .groups = "drop"
+  ) |>
+  arrange(date)
+
+
+#remove na columns ensure there is 8 rows per day
+
+
+
+
+
+
+
+
+
+
+
 
 
 # Interactive Map -------------------------------------------------------------------------
 
 library(leaflet)
 
-# Get unique years
-years <- unique(merged_data$year)
-
-# Create a map for each year
-for(y in years) {
-  map <- merged_data |> 
-    filter(crime_distance_miles_fs <= 5, year == y) |> 
-    leaflet() |> 
-    addTiles() |> 
-    addCircleMarkers(
-      lng = ~Longitude, 
-      lat = ~Latitude,
-      radius = 3,
-      color = ~colorNumeric("RdYlBu", crime_distance_miles_fs)(crime_distance_miles_fs),
-      popup = ~paste("Distance:", round(crime_distance_miles_fs, 2), "miles")
-    ) |> 
-    addMarkers(
-      lng = -94.55448775544315, 
-      lat = 39.06903775959004,
-      popup = "Reference Point"
-    )
-  
-  print(paste("Map for year:", y))
-  print(map)
-}
-
-# OR create one interactive map with a layer for each year:
-library(leaflet)
-
+# Define color based on crime density (violent + theft = most dense)
 merged_data_filtered <- merged_data |> 
-  filter(crime_distance_miles_fs <= 5)
+  filter(crime_distance_miles_fs <= 5) |>
+  filter(!is.na(violent), !is.na(theft)) |>
+  mutate(
+    crime_type = case_when(
+      violent == 1 & theft == 1 ~ "Violent Theft",
+      violent == 1 & theft == 0 ~ "Violent Non-Theft",
+      violent == 0 & theft == 1 ~ "Non-Violent Theft",
+      violent == 0 & theft == 0 ~ "Non-Violent Non-Theft"
+    ),
+    color = case_when(
+      crime_type == "Violent Theft" ~ "#8B0000",
+      crime_type == "Violent Non-Theft" ~ "#FF4500",
+      crime_type == "Non-Violent Theft" ~ "#FF8C00",
+      crime_type == "Non-Violent Non-Theft" ~ "#FFD700"
+    )
+  )
 
 # Create base map
 map <- leaflet() |> 
@@ -208,28 +270,75 @@ map <- leaflet() |>
   addMarkers(
     lng = -94.55448775544315, 
     lat = 39.06903775959004,
-    popup = "Reference Point"
+    popup = "Reference Point (Store)"
   )
 
 # Add a layer for each year
 for(y in sort(unique(merged_data_filtered$year))) {
   year_data <- merged_data_filtered |> filter(year == y)
   
-  map <- m |> 
+  map <- map |> 
     addCircleMarkers(
       data = year_data,
       lng = ~Longitude, 
       lat = ~Latitude,
       radius = 3,
       group = as.character(y),
-      color = ~colorNumeric("RdYlBu", crime_distance_miles_fs)(crime_distance_miles_fs),
-      popup = ~paste("Year:", year, "<br>Distance:", round(crime_distance_miles_fs, 2), "miles")
+      color = ~color,
+      fillOpacity = 0.7,
+      popup = ~paste(
+        "Date:", date, "<br>",
+        "Type:", crime_type, "<br>",
+        "Description:", Description, "<br>",
+        "Distance:", round(crime_distance_miles_fs, 2), "miles", "<br>",
+        "Violent:", violent, "<br>",
+        "Theft:", theft, "<br>",
+        "Year:", year
+      )
     )
 }
 
-# Add layer control so you can toggle years on/off
+# Add legend
+map <- map |> 
+  addLegend(
+    position = "bottomright",
+    colors = c("#8B0000", "#FF4500", "#FF8C00", "#FFD700"),
+    labels = c("Violent Theft", "Violent Non-Theft", "Non-Violent Theft", "Non-Violent Non-Theft"),
+    title = "Crime Type"
+  )
+
+# Add layer control to toggle years
 map |> addLayersControl(
   overlayGroups = as.character(sort(unique(merged_data_filtered$year))),
   options = layersControlOptions(collapsed = FALSE)
 )
 
+
+
+
+# ggplot fun --------------------------------------------------------------
+
+merged_data |>
+  filter(close == 1) |>
+  group_by(date) |>
+  summarise(total_crimes = n(), after_open = max(after_open)) |>
+  ggplot(aes(x = date, y = total_crimes)) +
+  geom_line(color = "steelblue", alpha = 0.3) +
+  geom_smooth(aes(group = factor(after_open), color = factor(after_open)), 
+              method = "lm", se = TRUE) +
+  geom_vline(xintercept = as.Date("2018-06-16"), color = "red", 
+             linetype = "dashed", linewidth = 1) +
+  annotate("text", x = as.Date("2018-06-16"), 
+           y = max(merged_data |> filter(close == 1) |> group_by(date) |> summarise(n = n()) |> pull(n)), 
+           label = "Store Opens", color = "red", hjust = -0.1, size = 4) +
+  scale_color_manual(values = c("0" = "darkblue", "1" = "darkorange"),
+                     labels = c("0" = "Before Opening", "1" = "After Opening"),
+                     name = "") +
+  labs(
+    title = "Daily Crime Within 0.25 Miles of Store",
+    subtitle = "Separate trends before and after store opening",
+    x = "Date",
+    y = "Total Crimes"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
